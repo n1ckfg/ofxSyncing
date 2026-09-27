@@ -349,9 +349,9 @@ Results on a Pi 4:
 | WiFi, simulated (2 ± 1 ms, 1% loss, 20% of packets spiking up to 40 ms) | 0.46 ms |
 | `netem delay 20ms 10ms loss 5%`, simulated | 3.7 ms |
 | 8 hours, crystals 200 ppm apart, simulated | 0.03 ms (max 0.05 ms) |
-| Two processes on one Pi, real UDP | 0.07–0.12 ms |
+| Two processes on one Pi, real UDP | 0.07–0.13 ms |
 
-On one Pi, events fired 0.06–0.1 ms after their time on the scheduler thread, and within 0.1 ms of each other across the two processes. Two processes on one machine share its cores, so their receive threads wake unevenly, and that asymmetry (about 0.06 ms) is most of what's left. Two Pis each wake on their own network interrupt.
+On one Pi, events fired 0.06–0.11 ms after their time on the scheduler thread, and within 0.07–0.12 ms of each other across the two processes. Two processes on one machine share its cores, so their receive threads wake unevenly, and that asymmetry (about 0.06 ms) is most of what's left. Two Pis each wake on their own network interrupt.
 
 These numbers come from simulations and from one Pi. The precision between separate Pis has to be measured on real hardware, as below.
 
