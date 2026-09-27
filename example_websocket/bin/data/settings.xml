@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings>
+    <!-- ~ ~ ~ this example ~ ~ ~ -->
+
+    <!-- The master's address. Empty makes this node the master: it runs the
+         WebSocket server, and serves the browser client from
+         bin/data/DocumentRoot at http://<its address>:<port>/.
+         Followers connect to it: a hostname, a Tailscale name or 100.x
+         address, or a port-forwarded public address. -->
+    <ws_connect></ws_connect>
+
+    <!-- wss:// instead of ws://. The server needs a certificate in
+         bin/data/ssl (certificate.pem and privateKey.pem); see the README.
+         Not needed over Tailscale, which encrypts already. -->
+    <ws_ssl>0</ws_ssl>
+
+    <!-- How long the screen flashes. -->
+    <flash_ms>100</flash_ms>
+    <fullscreen>0</fullscreen>
+
+    <!-- ~ ~ ~ ofxSyncing ~ ~ ~
+         Any of these can be overridden on the command line by name, e.g.
+         ws_connect and node_id (see the README). -->
+
+    <group>default</group>
+
+    <!-- Empty means the hostname. -->
+    <node_id></node_id>
+
+    <!-- The master's priority. Followers always get 0: over WebSockets they
+         can only reach the master, so none of them can take over. -->
+    <priority>100</priority>
+
+    <!-- The server's port, and the one followers connect to. -->
+    <port>9400</port>
+
+    <!-- Clients must present this before they can schedule events or change
+         timelines. Without it they can still sync and watch. Anyone who can
+         reach the port can try it, so make it long and random if the port is
+         open to the internet. Empty means no check. -->
+    <auth_token>change-me</auth_token>
+
+    <ping_hz>1</ping_hz>
+
+    <!-- The least lead time. Over the internet the lead grows automatically
+         with the slowest follower's round trip. -->
+    <lead_floor_ms>50</lead_floor_ms>
+    <late_tolerance_ms>10</late_tolerance_ms>
+    <step_threshold_ms>20</step_threshold_ms>
+    <output_latency_us>0</output_latency_us>
+    <csv_log></csv_log>
+</settings>

@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ofxSyncing client</title>
+<style>
+  :root {
+    --bg: #111;
+    --fg: #eee;
+    --dim: #888;
+    --bar: #09f;
+    --ok: #4c8;
+    --bad: #e64;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow: hidden;
+  }
+  #flash { position: fixed; inset: 0; opacity: 0; pointer-events: none; }
+  main { position: relative; padding: 16px; max-width: 760px; }
+  h1 { font-size: 15px; font-weight: normal; color: var(--dim); margin: 0 0 12px; }
+  #clock { font-size: clamp(32px, 10vw, 72px); letter-spacing: 0.02em; margin: 0; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 12px 0; }
+  dt { color: var(--dim); }
+  dd { margin: 0; }
+  .ok { color: var(--ok); }
+  .bad { color: var(--bad); }
+  form, .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+  input, button {
+    font: inherit; color: var(--fg); background: #222; border: 1px solid #444; border-radius: 4px; padding: 6px 10px;
+  }
+  button:disabled { color: #555; }
+  input { min-width: 0; flex: 1 1 200px; }
+  #track { position: fixed; left: 0; right: 0; bottom: 0; height: 28vh; }
+  #bar { position: absolute; top: 0; bottom: 0; width: 10px; margin-left: -5px; background: var(--bar); }
+  p.note { color: var(--dim); max-width: 60ch; }
+</style>
+</head>
+<body>
+<div id="flash"></div>
+<main>
+  <h1>ofxSyncing browser client</h1>
+  <p id="clock">--:--:--.---</p>
+  <dl>
+    <dt>connection</dt><dd id="conn">connecting</dd>
+    <dt>master</dt><dd id="master">-</dd>
+    <dt>error</dt><dd id="error">-</dd>
+    <dt>round trip</dt><dd id="delay">-</dd>
+    <dt>lead</dt><dd id="lead">-</dd>
+    <dt>timeline</dt><dd id="timeline">-</dd>
+  </dl>
+  <form id="auth">
+    <input id="token" type="password" placeholder="auth token" autocomplete="current-password">
+    <button>authorize</button>
+  </form>
+  <div class="buttons">
+    <button id="flashButton" disabled>flash</button>
+    <button id="playButton" disabled>play / pause</button>
+    <button id="rewindButton" disabled>rewind</button>
+  </div>
+  <p class="note">Browser timers are coarse, so this is a demo of the protocol, not a precision client.</p>
+</main>
+<div id="track"><div id="bar"></div></div>
+
+<script>
+"use strict";
+
+// The ofxSyncing protocol, as JSON over the same WebSocket the Pis use.
+// Every time is an integer count of µs.
+
+const params = new URLSearchParams(location.search);
+const group = params.get("group") || "default";
+const nodeId = "browser-" + Math.random().toString(36).slice(2, 8);
+const TIMELINE = "bar";
+const BAR_PERIOD = 4e6;
+const FLASH_US = 100000;
+
+// This page's local clock: monotonic, in µs.
+const local = () => Math.round((performance.timeOrigin + performance.now()) * 1000);
+
+let ws = null;
+let term = 0;
+let masterId = "";
+let leadUs = 0;
+let authorized = false;
+let haveSnapshot = false;
+
+// Clock sync: NTP-style samples, the one with the smallest error bound wins.
+const samples = [];
+let offset = null;       // master's shared time minus local time
+let errorUs = 0;
+let seq = 0;
+const outstanding = new Map();
+
+// Events and timelines.
+const seen = new Set();
+const events = [];
+const timelines = new Map();  // id -> states
+let requestSeq = Math.floor(Math.random() * 1e9);
+const requests = new Map();   // request id -> { message, until }
+let flash = { at: -Infinity, color: "#fff" };
+
+const shared = () => offset === null ? null : local() + offset;
+
+function message(type, fields) {
+  return Object.assign({ type, group, node: nodeId, term }, fields);
+}
+
+function send(m) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m));
+}
+
+function ping() {
+  seq = (seq + 1) >>> 0;
+  outstanding.set(seq, true);
+  send(message("ping", { seq, t0: local(), want_snapshot: !haveSnapshot }));
+}
+
+function beacon() {
+  send(message("beacon", {
+    priority: 0, address: "", port: 0, is_master: false, master: masterId,
+    shared_us: shared() || 0, lead_us: 0, locked: offset !== null,
+    error_us: errorUs, delay_us: medianDelay(), delay_p99_us: 0, drift_ppm: 0
+  }));
+}
+
+function medianDelay() {
+  if (!samples.length) return 0;
+  const d = samples.map(s => s.delay).sort((a, b) => a - b);
+  return d[Math.floor(d.length / 2)];
+}
+
+function onPong(m) {
+  if (!outstanding.delete(m.seq)) return;
+  const t3 = local();
+  const s = {
+    offset: ((m.t1 - m.t0) + (m.t2 - t3)) / 2,
+    delay: Math.max(0, (t3 - m.t0) - (m.t2 - m.t1)),
+    at: (m.t0 + t3) / 2
+  };
+  samples.push(s);
+  if (samples.length > 32) samples.shift();
+
+  // Half the delay, plus 100 ppm of drift for every µs of age.
+  const now = local();
+  let best = null, bound = Infinity;
+  for (const x of samples) {
+    const b = x.delay / 2 + (now - x.at) * 100e-6;
+    if (b < bound) { bound = b; best = x; }
+  }
+  offset = Math.round(best.offset);
+  errorUs = Math.round(bound);
+}
+
+function timelineAt(id, t) {
+  const states = timelines.get(id);
+  if (!states || !states.length) return null;
+  let current = null;
+  for (const s of states) {
+    if (s.t0 <= t && (!current || s.version > current.version)) current = s;
+  }
+  return current || { id, version: 0, t0: states[0].t0, p0: states[0].p0, rate: 0 };
+}
+
+function applyTimeline(state) {
+  const states = timelines.get(state.id) || [];
+  if (states.some(s => s.version === state.version)) return;
+  states.push(state);
+  states.sort((a, b) => a.version - b.version);
+  timelines.set(state.id, states.slice(-8));
+}
+
+function addEvent(e) {
+  const key = e.origin + "#" + e.seq;
+  send(message("ack", { event: { origin: e.origin, seq: e.seq } }));
+  requests.delete(key);
+  if (seen.has(key)) return;
+  seen.add(key);
+  events.push(e);
+}
+
+function onMessage(m) {
+  if (m.to && m.to !== nodeId) return;
+  if (m.type === "auth_result") {
+    authorized = !!m.ok;
+    return;
+  }
+  if (m.group !== group) return;
+  if (m.term && m.term < term) return;
+
+  switch (m.type) {
+    case "beacon":
+      if (m.is_master) {
+        if (m.node !== masterId || m.term !== term) {
+          masterId = m.node;
+          term = m.term;
+          samples.length = 0;
+          haveSnapshot = false;
+          for (let i = 0; i < 8; i++) setTimeout(ping, i * 50);
+        }
+        leadUs = m.lead_us;
+      }
+      break;
+    case "pong":
+      onPong(m);
+      break;
+    case "event":
+      addEvent(m.event);
+      break;
+    case "timeline":
+      if (m.request) requests.delete(m.request.origin + "#" + m.request.seq);
+      applyTimeline(m.timeline);
+      break;
+    case "snapshot":
+      timelines.clear();
+      for (const t of m.timelines) applyTimeline(t);
+      for (const e of m.events) addEvent(e);
+      haveSnapshot = true;
+      break;
+  }
+}
+
+// Requests go to the master, which assigns the time; resent until it
+// confirms, as the Pis do.
+function request(type, fields) {
+  requestSeq++;
+  const id = { origin: nodeId, seq: requestSeq };
+  const m = message(type, fields(id));
+  requests.set(id.origin + "#" + id.seq, { message: m, until: performance.now() + 5000 });
+  send(m);
+}
+
+function requestFlash() {
+  const hue = Math.floor(Math.random() * 360);
+  const rgb = hslToRgb(hue / 360, 0.8, 0.55).join(",");
+  request("event_request", id => ({
+    event: Object.assign({ name: "flash", time: 0, payload: rgb, late_policy: "fire_late" }, id),
+    lead_us: 0
+  }));
+}
+
+function requestTimeline(change) {
+  request("timeline", id => Object.assign({
+    timeline: { id: TIMELINE, version: 0, t0: 0, p0: change.position || 0, rate: change.rate || 0 },
+    has_position: "position" in change,
+    has_rate: "rate" in change,
+    request: id
+  }));
+}
+
+function hslToRgb(h, s, l) {
+  const f = n => {
+    const k = (n + h * 12) % 12;
+    const a = s * Math.min(l, 1 - l);
+    return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+  };
+  return [f(0), f(8), f(4)];
+}
+
+function connect() {
+  const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+  ws = new WebSocket(scheme + location.host + "/");
+  ws.onopen = () => {
+    const token = document.getElementById("token").value;
+    if (token) send({ type: "auth", token });
+    beacon();
+  };
+  ws.onmessage = e => {
+    try { onMessage(JSON.parse(e.data)); } catch (err) { /* not ours */ }
+  };
+  ws.onclose = () => {
+    authorized = false;
+    setTimeout(connect, 2000);
+  };
+}
+
+document.getElementById("auth").addEventListener("submit", e => {
+  e.preventDefault();
+  send({ type: "auth", token: document.getElementById("token").value });
+});
+document.getElementById("flashButton").onclick = requestFlash;
+document.getElementById("playButton").onclick = () => {
+  const t = shared();
+  const state = t === null ? null : timelineAt(TIMELINE, t);
+  requestTimeline({ rate: state && state.rate ? 0 : 1 });
+};
+document.getElementById("rewindButton").onclick = () => requestTimeline({ position: 0 });
+
+setInterval(() => {
+  if (masterId) ping();
+  beacon();
+  const now = performance.now();
+  for (const [key, r] of requests) {
+    if (now > r.until) requests.delete(key);
+    else send(r.message);
+  }
+}, 1000);
+
+function pad(n, w) { return String(n).padStart(w, "0"); }
+
+function clockString(us) {
+  const ms = Math.floor(Math.max(us, 0) / 1000) % 86400000;
+  return pad(Math.floor(ms / 3600000), 2) + ":" + pad(Math.floor(ms / 60000) % 60, 2) + ":" +
+         pad(Math.floor(ms / 1000) % 60, 2) + "." + pad(ms % 1000, 3);
+}
+
+function frame() {
+  const t = shared();
+  const connected = ws && ws.readyState === WebSocket.OPEN;
+  const conn = document.getElementById("conn");
+  conn.textContent = connected ? (authorized ? "connected, authorized" : "connected, watching") : "connecting";
+  conn.className = connected ? "ok" : "bad";
+  for (const id of ["flashButton", "playButton", "rewindButton"]) {
+    document.getElementById(id).disabled = !connected || !authorized;
+  }
+
+  if (t !== null) {
+    document.getElementById("clock").textContent = clockString(t);
+    document.getElementById("master").textContent = masterId + ", term " + term;
+    document.getElementById("error").textContent = (errorUs / 1000).toFixed(2) + " ms";
+    document.getElementById("delay").textContent = (medianDelay() / 1000).toFixed(2) + " ms";
+    document.getElementById("lead").textContent = (leadUs / 1000).toFixed(0) + " ms";
+
+    // Events whose time has come.
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.time <= t) {
+        if (t - e.time < FLASH_US && e.time > flash.at) {
+          flash = { at: e.time, color: e.name === "flash" && e.payload ? "rgb(" + e.payload + ")" : "#fff" };
+        }
+        events.splice(i, 1);
+      }
+    }
+    const lit = t >= flash.at && t < flash.at + FLASH_US;
+    const f = document.getElementById("flash");
+    f.style.background = flash.color;
+    f.style.opacity = lit ? 1 : 0;
+
+    const state = timelineAt(TIMELINE, t);
+    if (state) {
+      const position = state.p0 + (t - state.t0) * state.rate;
+      const x = (((position % BAR_PERIOD) + BAR_PERIOD) % BAR_PERIOD) / BAR_PERIOD;
+      document.getElementById("bar").style.left = (x * 100) + "%";
+      document.getElementById("timeline").textContent =
+        (state.rate ? "playing" : "paused") + " at " + (position / 1e6).toFixed(3) + " s";
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+connect();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

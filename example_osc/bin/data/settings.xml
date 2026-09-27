@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings>
+    <!-- ~ ~ ~ ofxSyncing ~ ~ ~
+         Any of these can be overridden on the command line by name, e.g.
+         node_id and priority for a second node on the same Pi (see the
+         README). -->
+
+    <!-- Nodes only sync with others in the same group. -->
+    <group>default</group>
+
+    <!-- Empty means the hostname. -->
+    <node_id></node_id>
+
+    <!-- The live node with the highest priority becomes master; ties go to
+         the higher node id. 0 means never master. A node that joins later
+         follows the current master whatever its priority. -->
+    <priority>100</priority>
+
+    <!-- Announce and accept peers on this interface only, e.g. eth0. Empty
+         means any. Set it on a Pi with both eth0 and wlan0 up. -->
+    <interface></interface>
+
+    <!-- beacon: multicast, finds peers on its own (the default).
+         static: only the peers listed below.
+         bonjour: Avahi; needs libavahi-client-dev, see the README. -->
+    <discovery>beacon</discovery>
+    <peers>
+        <!-- <peer>pi-1.local</peer> -->
+        <!-- <peer>10.0.0.12:9400</peer> -->
+    </peers>
+
+    <!-- UDP port for OSC. Every node in a group can use the same one, unless
+         two run on one machine. -->
+    <port>9400</port>
+    <multicast_group>239.255.94.1</multicast_group>
+    <multicast_port>9401</multicast_port>
+
+    <!-- Clock pings per second, after the initial burst. -->
+    <ping_hz>1</ping_hz>
+
+    <!-- Events are scheduled at least this far ahead; more on a slow network. -->
+    <lead_floor_ms>50</lead_floor_ms>
+
+    <!-- A drop_late event that arrives later than this is dropped. -->
+    <late_tolerance_ms>10</late_tolerance_ms>
+
+    <!-- Clock errors up to this are slewed away without shared time ever
+         running backwards; bigger ones step it. -->
+    <step_threshold_ms>20</step_threshold_ms>
+
+    <!-- Fire events this much early, to cover display or audio latency
+         (a 60 Hz display shows a frame up to 16.7 ms after it's drawn). -->
+    <output_latency_us>0</output_latency_us>
+
+    <!-- Log offset, delay, error and drift for this node and every peer, e.g.
+         sync.csv (in bin/data). Empty is off. -->
+    <csv_log></csv_log>
+
+    <!-- 1-99 runs the scheduler thread SCHED_FIFO for tighter dispatch. Needs
+         an rtprio limit (see the README). 0 is off. -->
+    <realtime_priority>0</realtime_priority>
+
+    <!-- ~ ~ ~ this example ~ ~ ~ -->
+
+    <!-- A GPIO pin to pulse on every event, for measuring with a logic
+         analyzer or scope: a BCM number, or -1 for none. -->
+    <gpio_chip>/dev/gpiochip0</gpio_chip>
+    <gpio_line>-1</gpio_line>
+    <gpio_pulse_us>1000</gpio_pulse_us>
+
+    <!-- How long the screen flashes. -->
+    <flash_ms>100</flash_ms>
+    <fullscreen>0</fullscreen>
+</settings>
